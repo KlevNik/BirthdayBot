@@ -13,11 +13,17 @@ public class Main {
             TelegramBotsApi botsApi = new TelegramBotsApi(DefaultBotSession.class);
             BirthdayBot bot = new BirthdayBot();
             botsApi.registerBot(bot);
+            bot.startBirthdayNotifier();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
 
             ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
             long initialDelay = getInitialDelay();
             scheduler.scheduleAtFixedRate(() -> {
                 try {
+                    BirthdayBot bot = new BirthdayBot();
                     bot.handleCheckBirthdays(1770716295);
                     
                 } catch (Exception e) {
@@ -25,10 +31,7 @@ public class Main {
                 }
             }, initialDelay, 24 * 60 * 60, TimeUnit.SECONDS);
 
-        } catch (Exception e) {
-            e.printStackTrace();
         }
-    }
 
     private static long getInitialDelay() {
         LocalDateTime now = LocalDateTime.now();
@@ -39,3 +42,4 @@ public class Main {
         return Duration.between(now, nextRun).getSeconds();
     }
 }
+

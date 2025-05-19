@@ -5,20 +5,18 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import java.sql.SQLException;
-import java.time.Month;
-import java.time.format.TextStyle;
-import java.util.Locale;
-import java.util.Map;
-import java.util.TreeMap;
-import java.util.stream.Collectors;
-import java.time.LocalDate;
+import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.util.List;
+import java.time.format.TextStyle;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.stream.Collectors;
 
 public class BirthdayBot extends TelegramLongPollingBot {
     private final BirthdayDatabase database;
     private final DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
+    private ScheduledExecutorService scheduler;
 
     public BirthdayBot() {
         this.database = new BirthdayDatabase();
@@ -41,6 +39,8 @@ public class BirthdayBot extends TelegramLongPollingBot {
                     handleListBirthdays(chatId);
                 } else if (messageText.equals("/help")) {
                     sendHelp(chatId);
+                } else if (messageText.equals("/start")) {
+                    sendWelcome(chatId);
                 }
             } catch (Exception e) {
                 sendMessage(chatId, "⚠️ Ошибка: " + e.getMessage());
@@ -49,7 +49,6 @@ public class BirthdayBot extends TelegramLongPollingBot {
     }
 
     private void handleAddBirthday(long chatId, String messageText) throws Exception {
-        // Формат: /addbirthday Иванов Иван Иванович 15.08.1990
         String[] parts = messageText.split(" ", 5);
 
         if (parts.length < 4) {
@@ -74,7 +73,6 @@ public class BirthdayBot extends TelegramLongPollingBot {
     }
 
     private void handleDeleteBirthday(long chatId, String messageText) throws Exception {
-        // Формат: /deletebirthday Иванов Иван Иванович
         String[] parts = messageText.split(" ", 4);
 
         if (parts.length < 3) {
@@ -92,10 +90,6 @@ public class BirthdayBot extends TelegramLongPollingBot {
         sendMessage(chatId, "✅ День рождения для " + fullName + " удалён!");
     }
 
-    private String buildFullName(String lastName, String firstName, String middleName) {
-        return lastName + " " + firstName + (middleName != null ? " " + middleName : "");
-    }
-
     void handleCheckBirthdays(long chatId) throws Exception {
         LocalDate today = LocalDate.now();
         List<String> birthdays = database.getBirthdaysByDate(today);
@@ -111,50 +105,127 @@ public class BirthdayBot extends TelegramLongPollingBot {
         }
     }
 
-    private void handleListBirthdays(long chatId) {
-        try {
-            List<BirthdayDatabase.BirthdayRecord> birthdays = database.getAllBirthdays(chatId);
+    private void handleListBirthdays(long chatId) throws Exception {
+        List<BirthdayDatabase.BirthdayRecord> birthdays = database.getAllBirthdays(chatId);
 
-            if (birthdays.isEmpty()) {
-                sendMessage(chatId, "В базе нет записей о днях рождения.");
-                return;
-            }
-
-            // Группируем по месяцам
-            Map<Month, List<BirthdayDatabase.BirthdayRecord>> birthdaysByMonth = birthdays.stream()
-                    .collect(Collectors.groupingBy(
-                            record -> record.getBirthDate().getMonth(),
-                            TreeMap::new,
-                            Collectors.toList()
-                    ));
-
-            StringBuilder message = new StringBuilder("📅 Все дни рождения:\n\n");
-
-            for (Map.Entry<Month, List<BirthdayDatabase.BirthdayRecord>> entry : birthdaysByMonth.entrySet()) {
-                message.append("🗓 ").append(entry.getKey().getDisplayName(
-                        TextStyle.FULL_STANDALONE,
-                        new Locale("ru"))
-                ).append(":\n");
-
-                for (BirthdayDatabase.BirthdayRecord record : entry.getValue()) {
-                    message.append("• ").append(record.getFormattedDate())
-                            .append(" - ").append(record.getFullName())
-                            .append("\n");
-                }
-
-                message.append("\n");
-            }
-
-            // Если сообщение слишком длинное, разбиваем на части
-            if (message.length() > 4000) {
-                splitAndSendLongMessage(chatId, message.toString());
-            } else {
-                sendMessage(chatId, message.toString());
-            }
-
-        } catch (SQLException e) {
-            sendMessage(chatId, "⚠️ Ошибка при получении списка дней рождения: " + e.getMessage());
+        if (birthdays.isEmpty()) {
+            sendMessage(chatId, "В базе нет записей о днях рождения.");
+            return;
         }
+
+        Map<Month, List<BirthdayDatabase.BirthdayRecord>> byMonth = birthdays.stream()
+                .collect(Collectors.groupingBy(
+                        r -> r.getBirthDate().getMonth(),
+                        TreeMap::new,
+                        Collectors.toList()
+                ));
+
+        StringBuilder message = new StringBuilder("📅 Все дни рождения:\n\n");
+
+        for (Map.Entry<Month, List<BirthdayDatabase.BirthdayRecord>> entry : byMonth.entrySet()) {
+            message.append("🗓 ").append(entry.getKey().getDisplayName(
+                    TextStyle.FULL_STANDALONE,
+                    new Locale("ru"))
+            ).append(":\n");
+
+            for (BirthdayDatabase.BirthdayRecord record : entry.getValue()) {
+                message.append("• ").append(record.getFormattedDate())
+                        .append(" - ").append(record.getFullName())
+                        .append("\n");
+            }
+            message.append("\n");
+        }
+
+        splitAndSendLongMessage(chatId, message.toString());
+    }
+
+    public void startBirthdayNotifier() {
+        scheduler = Executors.newScheduledThreadPool(1);
+        long initialDelay = getInitialDelay();
+
+        scheduler.scheduleAtFixedRate(() -> {
+            try {
+                checkAndNotifyUpcomingBirthdays();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }, initialDelay, TimeUnit.DAYS.toSeconds(1), TimeUnit.SECONDS);
+    }
+
+    private void checkAndNotifyUpcomingBirthdays() throws SQLException {
+        checkBirthdaysForDay(0);  // Сегодня
+        checkBirthdaysForDay(3);  // Через 3 дня
+        checkBirthdaysForDay(7);  // Через неделю
+    }
+
+    private void checkBirthdaysForDay(int daysBefore) throws SQLException {
+        List<BirthdayDatabase.BirthdayRecord> upcoming = database.getUpcomingBirthdays(daysBefore);
+
+        for (BirthdayDatabase.BirthdayRecord record : upcoming) {
+            String message = createNotificationMessage(record, daysBefore);
+            sendMessage(record.getChatId(), message);
+        }
+    }
+
+    private String createNotificationMessage(BirthdayDatabase.BirthdayRecord record, int daysBefore) {
+        String fullName = record.getFullName();
+        String formattedDate = record.getFormattedDate();
+        int years = Year.now().getValue() - record.getBirthDate().getYear();
+
+        if (daysBefore == 0) {
+            return String.format(
+                    "🎉 Сегодня день рождения у %s! (%s, %d %s)\n" +
+                            "Не забудьте поздравить! 🎂🎁",
+                    fullName, formattedDate, years, getYearWord(years));
+        } else {
+            return String.format(
+                    "🔔 Напоминание: через %d %s день рождения у %s (%s, будет %d %s)\n" +
+                            "Подготовьте поздравление!",
+                    daysBefore, getDayWord(daysBefore), fullName,
+                    formattedDate, years + 1, getYearWord(years + 1));
+        }
+    }
+
+    private String getDayWord(int days) {
+        if (days % 10 == 1 && days % 100 != 11) return "день";
+        if (days % 10 >= 2 && days % 10 <= 4 &&
+                (days % 100 < 10 || days % 100 >= 20)) return "дня";
+        return "дней";
+    }
+
+    private String getYearWord(int years) {
+        if (years % 10 == 1 && years % 100 != 11) return "год";
+        if (years % 10 >= 2 && years % 10 <= 4 &&
+                (years % 100 < 10 || years % 100 >= 20)) return "года";
+        return "лет";
+    }
+
+    private void sendWelcome(long chatId) {
+        String text = "👋 Привет! Я бот для напоминания о днях рождения.\n\n" +
+                "Используйте /help для списка команд";
+        sendMessage(chatId, text);
+    }
+
+    private void sendHelp(long chatId) {
+        String helpText = """
+                🎂 Бот для уведомлений о днях рождения 🎂
+                
+                Команды:
+                /addbirthday Фамилия Имя Отчество(опц.) dd.MM.yyyy - добавить
+                /deletebirthday Фамилия Имя Отчество(опц.) - удалить
+                /checkbirthdays - проверить сегодняшние дни рождения
+                /listbirthdays - показать все дни рождения (сгруппированы по месяцам)
+                /help - показать это сообщение
+                
+                Примеры:
+                /addbirthday Иванов Иван Иванович 15.08.1990
+                /addbirthday Петров Петр 20.05.1985
+                /deletebirthday Иванов Иван Иванович""";
+        sendMessage(chatId, helpText);
+    }
+
+    private String buildFullName(String lastName, String firstName, String middleName) {
+        return lastName + " " + firstName + (middleName != null ? " " + middleName : "");
     }
 
     private void splitAndSendLongMessage(long chatId, String longMessage) {
@@ -165,24 +236,6 @@ public class BirthdayBot extends TelegramLongPollingBot {
         }
     }
 
-    private void sendHelp(long chatId) {
-        String helpText = """
-            🎂 Бот для уведомлений о днях рождения 🎂
-            
-            Команды:
-            /addbirthday Фамилия Имя Отчество(опц.) dd.MM.yyyy - добавить
-            /deletebirthday Фамилия Имя Отчество(опц.) - удалить
-            /checkbirthdays - проверить сегодняшние дни рождения
-            /listbirthdays - показать все дни рождения (сгруппированы по месяцам)
-            /help - показать это сообщение
-            
-            Примеры:
-            /addbirthday Иванов Иван Иванович 15.08.1990
-            /addbirthday Петров Петр 20.05.1985
-            /deletebirthday Иванов Иван Иванович""";
-        sendMessage(chatId, helpText);
-    }
-
     private void sendMessage(long chatId, String text) {
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
@@ -191,24 +244,17 @@ public class BirthdayBot extends TelegramLongPollingBot {
         try {
             execute(message);
         } catch (TelegramApiException e) {
-            e.printStackTrace();
+            System.err.println("Ошибка при отправке сообщения: " + e.getMessage());
         }
     }
 
-    // Метод для автоматической проверки дней рождения
-    public void checkBirthdaysScheduled() throws Exception {
-        LocalDate today = LocalDate.now();
-        List<String> birthdays = database.getBirthdaysByDate(today);
-
-        if (!birthdays.isEmpty()) {
-            StringBuilder message = new StringBuilder("🎉 Сегодня день рождения у:\n");
-            for (String name : birthdays) {
-                message.append("- ").append(name).append("\n");
-            }
-            // ID группы для уведомлений
-            String groupChatId = "ВАШ_GROUP_CHAT_ID";
-            sendMessage(Long.parseLong(groupChatId), message.toString());
+    private static long getInitialDelay() {
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime nextRun = now.withHour(9).withMinute(0).withSecond(0);
+        if (now.isAfter(nextRun)) {
+            nextRun = nextRun.plusDays(1);
         }
+        return Duration.between(now, nextRun).getSeconds();
     }
 
     @Override
@@ -219,6 +265,22 @@ public class BirthdayBot extends TelegramLongPollingBot {
     @Override
     public String getBotToken() {
         return "8121916279:AAFkmyUek7WsV6ib1dQ6ZHWP1sGc-4nOiXo";
+    }
+
+    @Override
+    public void onClosing() {
+        if (scheduler != null) {
+            scheduler.shutdown();
+            try {
+                if (!scheduler.awaitTermination(10, TimeUnit.SECONDS)) {
+                    scheduler.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                scheduler.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+        super.onClosing();
     }
 }
 
