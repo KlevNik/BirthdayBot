@@ -1,6 +1,7 @@
 package my.ru;
 import java.sql.*;
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -29,7 +30,7 @@ public class BirthdayDatabase {
 
     public void addBirthday(String lastName, String firstName, String middleName,
                             LocalDate birthDate, long chatId) throws SQLException {
-        String sql = "INSERT INTO birthdays(last_name, first_name, middle_name, birth_date, chat_id) " +
+        String sql = "INSERT INTO birthdays (last_name, first_name, middle_name, birth_date, chat_id) " +
                 "VALUES(?, ?, ?, ?, ?)";
 
         try (Connection conn = DriverManager.getConnection(DB_URL);
@@ -81,8 +82,8 @@ public class BirthdayDatabase {
         }
     }
 
-    public List<String> getAllBirthdays(long chatId) throws SQLException {
-        List<String> birthdays = new ArrayList<>();
+    public List<BirthdayRecord> getAllBirthdays(long chatId) throws SQLException {
+        List<BirthdayRecord> birthdays = new ArrayList<>();
         String sql = "SELECT last_name, first_name, middle_name, birth_date FROM birthdays " +
                 "WHERE chat_id = ? ORDER BY strftime('%m-%d', birth_date)";
 
@@ -92,16 +93,40 @@ public class BirthdayDatabase {
             ResultSet rs = pstmt.executeQuery();
 
             while (rs.next()) {
-                String fullName = rs.getString("last_name") + " " +
-                        rs.getString("first_name") +
-                        (rs.getString("middle_name") != null ?
-                                " " + rs.getString("middle_name") : "");
-                LocalDate date = LocalDate.parse(rs.getString("birth_date"));
-                String formattedDate = date.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+                String lastName = rs.getString("last_name");
+                String firstName = rs.getString("first_name");
+                String middleName = rs.getString("middle_name");
+                LocalDate birthDate = LocalDate.parse(rs.getString("birth_date"));
 
-                birthdays.add(fullName + " - " + formattedDate);
+                birthdays.add(new BirthdayRecord(lastName, firstName, middleName, birthDate));
             }
         }
         return birthdays;
+    }
+
+    public static class BirthdayRecord {
+        private final String lastName;
+        private final String firstName;
+        private final String middleName;
+        private final LocalDate birthDate;
+
+        public BirthdayRecord(String lastName, String firstName, String middleName, LocalDate birthDate) {
+            this.lastName = lastName;
+            this.firstName = firstName;
+            this.middleName = middleName;
+            this.birthDate = birthDate;
+        }
+
+        public String getFullName() {
+            return lastName + " " + firstName + (middleName != null ? " " + middleName : "");
+        }
+
+        public String getFormattedDate() {
+            return birthDate.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"));
+        }
+
+        public LocalDate getBirthDate() {
+            return birthDate;
+        }
     }
 }

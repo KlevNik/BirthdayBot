@@ -4,6 +4,13 @@ import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
+import java.sql.SQLException;
+import java.time.Month;
+import java.time.format.TextStyle;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -89,7 +96,7 @@ public class BirthdayBot extends TelegramLongPollingBot {
         return lastName + " " + firstName + (middleName != null ? " " + middleName : "");
     }
 
-    private void handleCheckBirthdays(long chatId) throws Exception {
+    void handleCheckBirthdays(long chatId) throws Exception {
         LocalDate today = LocalDate.now();
         List<String> birthdays = database.getBirthdaysByDate(today);
 
@@ -104,26 +111,75 @@ public class BirthdayBot extends TelegramLongPollingBot {
         }
     }
 
-    private void handleListBirthdays(long chatId) throws Exception {
-        // Реализация просмотра всех дней рождения
-        sendMessage(chatId, "Функция в разработке...");
+    private void handleListBirthdays(long chatId) {
+        try {
+            List<BirthdayDatabase.BirthdayRecord> birthdays = database.getAllBirthdays(chatId);
+
+            if (birthdays.isEmpty()) {
+                sendMessage(chatId, "В базе нет записей о днях рождения.");
+                return;
+            }
+
+            // Группируем по месяцам
+            Map<Month, List<BirthdayDatabase.BirthdayRecord>> birthdaysByMonth = birthdays.stream()
+                    .collect(Collectors.groupingBy(
+                            record -> record.getBirthDate().getMonth(),
+                            TreeMap::new,
+                            Collectors.toList()
+                    ));
+
+            StringBuilder message = new StringBuilder("📅 Все дни рождения:\n\n");
+
+            for (Map.Entry<Month, List<BirthdayDatabase.BirthdayRecord>> entry : birthdaysByMonth.entrySet()) {
+                message.append("🗓 ").append(entry.getKey().getDisplayName(
+                        TextStyle.FULL_STANDALONE,
+                        new Locale("ru"))
+                ).append(":\n");
+
+                for (BirthdayDatabase.BirthdayRecord record : entry.getValue()) {
+                    message.append("• ").append(record.getFormattedDate())
+                            .append(" - ").append(record.getFullName())
+                            .append("\n");
+                }
+
+                message.append("\n");
+            }
+
+            // Если сообщение слишком длинное, разбиваем на части
+            if (message.length() > 4000) {
+                splitAndSendLongMessage(chatId, message.toString());
+            } else {
+                sendMessage(chatId, message.toString());
+            }
+
+        } catch (SQLException e) {
+            sendMessage(chatId, "⚠️ Ошибка при получении списка дней рождения: " + e.getMessage());
+        }
+    }
+
+    private void splitAndSendLongMessage(long chatId, String longMessage) {
+        int length = longMessage.length();
+        for (int i = 0; i < length; i += 4000) {
+            String part = longMessage.substring(i, Math.min(length, i + 4000));
+            sendMessage(chatId, part);
+        }
     }
 
     private void sendHelp(long chatId) {
         String helpText = """
-                🎂 Бот для уведомлений о днях рождения 🎂
-                
-                Команды:
-                /addbirthday Фамилия Имя Отчество(опц.) dd.MM.yyyy - добавить
-                /deletebirthday Фамилия Имя Отчество(опц.) - удалить
-                /checkbirthdays - проверить сегодняшние дни рождения
-                /listbirthdays - показать все дни рождения
-                /help - показать это сообщение
-                
-                Примеры:
-                /addbirthday Иванов Иван Иванович 15.08.1990
-                /addbirthday Петров Петр 20.05.1985
-                /deletebirthday Иванов Иван Иванович""";
+            🎂 Бот для уведомлений о днях рождения 🎂
+            
+            Команды:
+            /addbirthday Фамилия Имя Отчество(опц.) dd.MM.yyyy - добавить
+            /deletebirthday Фамилия Имя Отчество(опц.) - удалить
+            /checkbirthdays - проверить сегодняшние дни рождения
+            /listbirthdays - показать все дни рождения (сгруппированы по месяцам)
+            /help - показать это сообщение
+            
+            Примеры:
+            /addbirthday Иванов Иван Иванович 15.08.1990
+            /addbirthday Петров Петр 20.05.1985
+            /deletebirthday Иванов Иван Иванович""";
         sendMessage(chatId, helpText);
     }
 
