@@ -2,259 +2,334 @@ package my.ru;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardButton;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
 import java.sql.SQLException;
-import java.time.*;
+import java.time.LocalDate;
+import java.time.Month;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.TextStyle;
 import java.util.*;
-import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 public class BirthdayBot extends TelegramLongPollingBot {
     private final BirthdayDatabase database;
     private final DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("dd.MM.yyyy");
-    private ScheduledExecutorService scheduler;
+
+    // Кнопки интерфейса
+    private static final String ADD_BIRTHDAY = "➕ Добавить день рождения";
+    private static final String DELETE_BIRTHDAY = "➖ Удалить день рождения";
+    private static final String CHECK_TODAY = "🎂 Сегодняшние дни рождения";
+    private static final String LIST_ALL = "📅 Все дни рождения";
+    private static final String HELP = "❓ Помощь";
+    private static final String CANCEL = "❌ Отмена";
+
+    // Состояния
+    private static final String STATE_ADD = "ADD";
+    private static final String STATE_DELETE = "DELETE";
+    private final Map<Long, String> userStates = new HashMap<>();
 
     public BirthdayBot() {
         this.database = new BirthdayDatabase();
+    }
+    public BirthdayDatabase getDatabase() {
+        return this.database;
     }
 
     @Override
     public void onUpdateReceived(Update update) {
         if (update.hasMessage() && update.getMessage().hasText()) {
-            String messageText = update.getMessage().getText();
             long chatId = update.getMessage().getChatId();
+            String messageText = update.getMessage().getText();
 
             try {
-                if (messageText.startsWith("/addbirthday")) {
-                    handleAddBirthday(chatId, messageText);
-                } else if (messageText.startsWith("/deletebirthday")) {
-                    handleDeleteBirthday(chatId, messageText);
-                } else if (messageText.equals("/checkbirthdays")) {
-                    handleCheckBirthdays(chatId);
-                } else if (messageText.equals("/listbirthdays")) {
-                    handleListBirthdays(chatId);
-                } else if (messageText.equals("/help")) {
-                    sendHelp(chatId);
-                } else if (messageText.equals("/start")) {
-                    sendWelcome(chatId);
+                // Обработка отмены
+                if (messageText.equals(CANCEL)) {
+                    userStates.remove(chatId);
+                    showMainMenu(chatId);
+                    return;
                 }
+
+                String userState = userStates.get(chatId);
+
+                if (userState != null) {
+                    handleUserState(chatId, userState, messageText);
+                    return;
+                }
+
+                handleMainMenu(chatId, messageText);
             } catch (Exception e) {
-                sendMessage(chatId, "⚠️ Ошибка: " + e.getMessage());
+                sendError(chatId, e);
             }
         }
     }
 
-    private void handleAddBirthday(long chatId, String messageText) throws Exception {
-        String[] parts = messageText.split(" ", 5);
+    private void handleUserState(long chatId, String state, String input) throws SQLException {
+        switch (state) {
+            case STATE_ADD:
+                processAddBirthday(chatId, input);
+                break;
+            case STATE_DELETE:
+                processDeleteBirthday(chatId, input);
+                break;
+        }
+        userStates.remove(chatId);
+        showMainMenu(chatId);
+    }
 
-        if (parts.length < 4) {
-            sendMessage(chatId, "Неверный формат. Используйте: /addbirthday Фамилия Имя Отчество(опц.) dd.MM.yyyy");
+    private void handleMainMenu(long chatId, String command) throws SQLException {
+        switch (command) {
+            case ADD_BIRTHDAY:
+                prepareAddBirthday(chatId);
+                break;
+            case DELETE_BIRTHDAY:
+                prepareDeleteBirthday(chatId);
+                break;
+            case CHECK_TODAY:
+                showTodayBirthdays(chatId);
+                break;
+            case LIST_ALL:
+                showAllBirthdays(chatId);
+                break;
+            case HELP:
+                showHelp(chatId);
+                break;
+            default:
+                showMainMenu(chatId);
+        }
+    }
+
+    private void prepareAddBirthday(long chatId) {
+        userStates.put(chatId, STATE_ADD);
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText("Введите данные в формате:\nФамилия Имя Отчество(опционально) дд.мм.гггг\n\nПример:\nИванов Иван 15.08.1990\n\nИли нажмите ❌ Отмена");
+        showCancelKeyboard(message);
+        executeMessage(message);
+    }
+
+    private void processAddBirthday(long chatId, String input) throws SQLException {
+        String[] parts = input.split("\\s+", 4);
+
+        if (parts.length < 3) {
+            sendMessage(chatId, "❌ Неверный формат. Нужно: Фамилия Имя [Отчество] дд.мм.гггг");
             return;
         }
 
         try {
-            String lastName = parts[1];
-            String firstName = parts[2];
-            String middleName = parts.length > 4 ? parts[3] : null;
-            String dateStr = parts.length > 4 ? parts[4] : parts[3];
+            String lastName = parts[0];
+            String firstName = parts[1];
+            String middleName = parts.length > 3 ? parts[2] : null;
+            String dateStr = parts.length > 3 ? parts[3] : parts[2];
 
             LocalDate birthDate = LocalDate.parse(dateStr, dateFormatter);
             database.addBirthday(lastName, firstName, middleName, birthDate, chatId);
 
-            String fullName = buildFullName(lastName, firstName, middleName);
-            sendMessage(chatId, "✅ День рождения для " + fullName + " добавлен!");
+            sendMessage(chatId, "✅ Добавлен: " + formatName(lastName, firstName, middleName) +
+                    " - " + birthDate.format(dateFormatter));
         } catch (DateTimeParseException e) {
-            sendMessage(chatId, "❌ Ошибка формата даты. Используйте dd.MM.yyyy");
+            sendMessage(chatId, "❌ Ошибка формата даты. Используйте дд.мм.гггг");
         }
     }
 
-    private void handleDeleteBirthday(long chatId, String messageText) throws Exception {
-        String[] parts = messageText.split(" ", 4);
+    private void prepareDeleteBirthday(long chatId) {
+        userStates.put(chatId, STATE_DELETE);
 
-        if (parts.length < 3) {
-            sendMessage(chatId, "Неверный формат. Используйте: /deletebirthday Фамилия Имя Отчество(опц.)");
-            return;
-        }
-
-        String lastName = parts[1];
-        String firstName = parts[2];
-        String middleName = parts.length > 3 ? parts[3] : null;
-
-        database.deleteBirthday(lastName, firstName, middleName, chatId);
-
-        String fullName = buildFullName(lastName, firstName, middleName);
-        sendMessage(chatId, "✅ День рождения для " + fullName + " удалён!");
-    }
-
-    void handleCheckBirthdays(long chatId) throws Exception {
-        LocalDate today = LocalDate.now();
-        List<String> birthdays = database.getBirthdaysByDate(today);
-
-        if (birthdays.isEmpty()) {
-            sendMessage(chatId, "Сегодня никто не празднует день рождения 😊");
-        } else {
-            StringBuilder message = new StringBuilder("🎉 Сегодня день рождения у:\n");
-            for (String name : birthdays) {
-                message.append("- ").append(name).append("\n");
+        try {
+            List<BirthdayDatabase.BirthdayRecord> records = database.getAllBirthdays(chatId);
+            if (records.isEmpty()) {
+                sendMessage(chatId, "Нет записей для удаления");
+                userStates.remove(chatId);
+                return;
             }
-            sendMessage(chatId, message.toString());
+
+            SendMessage message = new SendMessage();
+            message.setChatId(String.valueOf(chatId));
+            message.setText("Выберите запись для удаления:\n(Фамилия Имя Отчество)\n\nИли нажмите ❌ Отмена");
+
+            ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+            List<KeyboardRow> rows = new ArrayList<>();
+
+            // Добавляем кнопки для каждой записи
+            for (BirthdayDatabase.BirthdayRecord record : records) {
+                KeyboardRow row = new KeyboardRow();
+                row.add(new KeyboardButton(record.getFullName()));
+                rows.add(row);
+            }
+
+            // Добавляем кнопку отмены
+            KeyboardRow cancelRow = new KeyboardRow();
+            cancelRow.add(new KeyboardButton(CANCEL));
+            rows.add(cancelRow);
+
+            keyboard.setKeyboard(rows);
+            keyboard.setResizeKeyboard(true);
+            message.setReplyMarkup(keyboard);
+
+            executeMessage(message);
+        } catch (SQLException e) {
+            sendError(chatId, e);
         }
     }
 
-    private void handleListBirthdays(long chatId) throws Exception {
-        List<BirthdayDatabase.BirthdayRecord> birthdays = database.getAllBirthdays(chatId);
+    private void processDeleteBirthday(long chatId, String input) throws SQLException {
+        String[] parts = input.split("\\s+", 3);
 
-        if (birthdays.isEmpty()) {
-            sendMessage(chatId, "В базе нет записей о днях рождения.");
+        if (parts.length < 2) {
+            sendMessage(chatId, "❌ Неверный формат. Нужно: Фамилия Имя [Отчество]");
             return;
         }
 
-        Map<Month, List<BirthdayDatabase.BirthdayRecord>> byMonth = birthdays.stream()
+        String lastName = parts[0];
+        String firstName = parts[1];
+        String middleName = parts.length > 2 ? parts[2] : null;
+
+        if (database.deleteBirthday(lastName, firstName, middleName, chatId)) {
+            sendMessage(chatId, "✅ Удален: " + formatName(lastName, firstName, middleName));
+        } else {
+            sendMessage(chatId, "❌ Запись не найдена");
+        }
+    }
+
+    private void showTodayBirthdays(long chatId) throws SQLException {
+        List<String> birthdays = database.getBirthdaysByDate(LocalDate.now());
+
+        if (birthdays.isEmpty()) {
+            sendMessage(chatId, "Сегодня никто не празднует день рождения 🎈");
+        } else {
+            StringBuilder sb = new StringBuilder("🎉 Сегодня день рождения у:\n\n");
+            birthdays.forEach(name -> sb.append("• ").append(name).append("\n"));
+            sendMessage(chatId, sb.toString());
+        }
+    }
+
+    private void showAllBirthdays(long chatId) throws SQLException {
+        List<BirthdayDatabase.BirthdayRecord> records = database.getAllBirthdays(chatId);
+
+        if (records.isEmpty()) {
+            sendMessage(chatId, "В базе нет записей о днях рождения");
+            return;
+        }
+
+        Map<Month, List<BirthdayDatabase.BirthdayRecord>> byMonth = records.stream()
                 .collect(Collectors.groupingBy(
                         r -> r.getBirthDate().getMonth(),
                         TreeMap::new,
                         Collectors.toList()
                 ));
 
-        StringBuilder message = new StringBuilder("📅 Все дни рождения:\n\n");
+        StringBuilder sb = new StringBuilder("📅 Все дни рождения:\n\n");
 
-        for (Map.Entry<Month, List<BirthdayDatabase.BirthdayRecord>> entry : byMonth.entrySet()) {
-            message.append("🗓 ").append(entry.getKey().getDisplayName(
-                    TextStyle.FULL_STANDALONE,
-                    new Locale("ru"))
-            ).append(":\n");
+        byMonth.forEach((month, monthRecords) -> {
+            sb.append("🗓 ").append(month.getDisplayName(TextStyle.FULL_STANDALONE, Locale.forLanguageTag("ru")))
+                    .append(":\n");
 
-            for (BirthdayDatabase.BirthdayRecord record : entry.getValue()) {
-                message.append("• ").append(record.getFormattedDate())
-                        .append(" - ").append(record.getFullName())
-                        .append("\n");
-            }
-            message.append("\n");
-        }
+            monthRecords.forEach(record ->
+                    sb.append("• ").append(record.getFormattedDate())
+                            .append(" - ").append(record.getFullName())
+                            .append("\n")
+            );
 
-        splitAndSendLongMessage(chatId, message.toString());
+            sb.append("\n");
+        });
+
+        sendMessage(chatId, sb.toString());
     }
 
-    public void startBirthdayNotifier() {
-        scheduler = Executors.newScheduledThreadPool(1);
-        long initialDelay = getInitialDelay();
-
-        scheduler.scheduleAtFixedRate(() -> {
-            try {
-                checkAndNotifyUpcomingBirthdays();
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-        }, initialDelay, TimeUnit.DAYS.toSeconds(1), TimeUnit.SECONDS);
-    }
-
-    private void checkAndNotifyUpcomingBirthdays() throws SQLException {
-        checkBirthdaysForDay(0);  // Сегодня
-        checkBirthdaysForDay(3);  // Через 3 дня
-        checkBirthdaysForDay(7);  // Через неделю
-    }
-
-    private void checkBirthdaysForDay(int daysBefore) throws SQLException {
-        List<BirthdayDatabase.BirthdayRecord> upcoming = database.getUpcomingBirthdays(daysBefore);
-
-        for (BirthdayDatabase.BirthdayRecord record : upcoming) {
-            String message = createNotificationMessage(record, daysBefore);
-            sendMessage(record.getChatId(), message);
-        }
-    }
-
-    private String createNotificationMessage(BirthdayDatabase.BirthdayRecord record, int daysBefore) {
-        String fullName = record.getFullName();
-        String formattedDate = record.getFormattedDate();
-        int years = Year.now().getValue() - record.getBirthDate().getYear();
-
-        if (daysBefore == 0) {
-            return String.format(
-                    "🎉 Сегодня день рождения у %s! (%s, %d %s)\n" +
-                            "Не забудьте поздравить! 🎂🎁",
-                    fullName, formattedDate, years, getYearWord(years));
-        } else {
-            return String.format(
-                    "🔔 Напоминание: через %d %s день рождения у %s (%s, будет %d %s)\n" +
-                            "Подготовьте поздравление!",
-                    daysBefore, getDayWord(daysBefore), fullName,
-                    formattedDate, years + 1, getYearWord(years + 1));
-        }
-    }
-
-    private String getDayWord(int days) {
-        if (days % 10 == 1 && days % 100 != 11) return "день";
-        if (days % 10 >= 2 && days % 10 <= 4 &&
-                (days % 100 < 10 || days % 100 >= 20)) return "дня";
-        return "дней";
-    }
-
-    private String getYearWord(int years) {
-        if (years % 10 == 1 && years % 100 != 11) return "год";
-        if (years % 10 >= 2 && years % 10 <= 4 &&
-                (years % 100 < 10 || years % 100 >= 20)) return "года";
-        return "лет";
-    }
-
-    private void sendWelcome(long chatId) {
-        String text = "👋 Привет! Я бот для напоминания о днях рождения.\n\n" +
-                "Используйте /help для списка команд";
-        sendMessage(chatId, text);
-    }
-
-    private void sendHelp(long chatId) {
+    private void showHelp(long chatId) {
         String helpText = """
-                🎂 Бот для уведомлений о днях рождения 🎂
+                🎂 <b>Бот-напоминатель о днях рождения</b> 🎂
                 
-                Команды:
-                /addbirthday Фамилия Имя Отчество(опц.) dd.MM.yyyy - добавить
-                /deletebirthday Фамилия Имя Отчество(опц.) - удалить
-                /checkbirthdays - проверить сегодняшние дни рождения
-                /listbirthdays - показать все дни рождения (сгруппированы по месяцам)
-                /help - показать это сообщение
+                <b>Как использовать:</b>
+                1. Добавить день рождения - вводите ФИО и дату
+                2. Удалить - выбираете из списка
+                3. Просматривайте дни рождения
                 
-                Примеры:
-                /addbirthday Иванов Иван Иванович 15.08.1990
-                /addbirthday Петров Петр 20.05.1985
-                /deletebirthday Иванов Иван Иванович""";
-        sendMessage(chatId, helpText);
+                <b>Формат даты:</b> дд.мм.гггг (например 15.08.1990)
+                
+                Данные хранятся в вашей личной базе""";
+
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText(helpText);
+        message.setParseMode("HTML");
+        executeMessage(message);
     }
 
-    private String buildFullName(String lastName, String firstName, String middleName) {
+    private void showMainMenu(long chatId) {
+        SendMessage message = new SendMessage();
+        message.setChatId(String.valueOf(chatId));
+        message.setText("Выберите действие:");
+
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        List<KeyboardRow> rows = new ArrayList<>();
+
+        // Первая строка
+        KeyboardRow row1 = new KeyboardRow();
+        row1.add(new KeyboardButton(ADD_BIRTHDAY));
+        row1.add(new KeyboardButton(DELETE_BIRTHDAY));
+
+        // Вторая строка
+        KeyboardRow row2 = new KeyboardRow();
+        row2.add(new KeyboardButton(CHECK_TODAY));
+        row2.add(new KeyboardButton(LIST_ALL));
+
+        // Третья строка
+        KeyboardRow row3 = new KeyboardRow();
+        row3.add(new KeyboardButton(HELP));
+
+        rows.add(row1);
+        rows.add(row2);
+        rows.add(row3);
+
+        keyboard.setKeyboard(rows);
+        keyboard.setResizeKeyboard(true);
+        message.setReplyMarkup(keyboard);
+
+        executeMessage(message);
+    }
+
+    private void showCancelKeyboard(SendMessage message) {
+        ReplyKeyboardMarkup keyboard = new ReplyKeyboardMarkup();
+        List<KeyboardRow> rows = new ArrayList<>();
+        KeyboardRow row = new KeyboardRow();
+        row.add(new KeyboardButton(CANCEL));
+        rows.add(row);
+        keyboard.setKeyboard(rows);
+        keyboard.setResizeKeyboard(true);
+        message.setReplyMarkup(keyboard);
+    }
+
+    private String formatName(String lastName, String firstName, String middleName) {
         return lastName + " " + firstName + (middleName != null ? " " + middleName : "");
     }
 
-    private void splitAndSendLongMessage(long chatId, String longMessage) {
-        int length = longMessage.length();
-        for (int i = 0; i < length; i += 4000) {
-            String part = longMessage.substring(i, Math.min(length, i + 4000));
-            sendMessage(chatId, part);
-        }
-    }
-
-    private void sendMessage(long chatId, String text) {
+    public void sendMessage(long chatId, String text) {
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
         message.setText(text);
-
         try {
             execute(message);
         } catch (TelegramApiException e) {
-            System.err.println("Ошибка при отправке сообщения: " + e.getMessage());
+            System.err.println("Ошибка отправки сообщения: " + e.getMessage());
         }
     }
 
-    private static long getInitialDelay() {
-        LocalDateTime now = LocalDateTime.now();
-        LocalDateTime nextRun = now.withHour(9).withMinute(0).withSecond(0);
-        if (now.isAfter(nextRun)) {
-            nextRun = nextRun.plusDays(1);
+    private void sendError(long chatId, Exception e) {
+        sendMessage(chatId, "⚠️ Ошибка: " + e.getMessage());
+        showMainMenu(chatId);
+    }
+
+    private void executeMessage(SendMessage message) {
+        try {
+            execute(message);
+        } catch (TelegramApiException e) {
+            System.err.println("Ошибка отправки сообщения: " + e.getMessage());
         }
-        return Duration.between(now, nextRun).getSeconds();
     }
 
     @Override
@@ -267,20 +342,7 @@ public class BirthdayBot extends TelegramLongPollingBot {
         return "8121916279:AAFkmyUek7WsV6ib1dQ6ZHWP1sGc-4nOiXo";
     }
 
-    @Override
-    public void onClosing() {
-        if (scheduler != null) {
-            scheduler.shutdown();
-            try {
-                if (!scheduler.awaitTermination(10, TimeUnit.SECONDS)) {
-                    scheduler.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                scheduler.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
-        }
-        super.onClosing();
+    public void handleCheckBirthdays(int i) {
     }
 }
 
